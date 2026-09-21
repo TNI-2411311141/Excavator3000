@@ -1,4 +1,4 @@
-#define CORE_DEBUG_LEVEL 3
+#define CORE_DEBUG_LEVEL ARDUHAL_LOG_LEVEL_DEBUG
 #define LOG_LOCAL_LEVEL ESP_LOG_DEBUG
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -47,33 +47,48 @@ struct mqtt_message {
 	const char *message;
 };
 
-xQueueHandle mqtt_message_queue = xQueueCreate(10, sizeof(mqtt_message));
+xQueueHandle mqtt_message_queue = xQueueCreate(10, sizeof(struct mqtt_message));
+TaskHandle_t mqtt_sender_handler = NULL;
 void mqtt_sender(void *) {
 	struct mqtt_message msg;
 	while (1) {
 		if (xQueueReceive(mqtt_message_queue, &msg, portMAX_DELAY) !=
-		    pdTRUE)
+		    pdTRUE) {
+			ESP_LOGW("mqtt_sender",
+			         "timed out reached, no message received");
 			continue;
-		mqtt.publish(msg.topic, msg.message);
+		}
+		ESP_LOGV("mqtt_sender", "received %s %s", msg.topic,
+		         msg.message);
+		if (mqtt.connected()) {
+			if (mqtt.publish(msg.topic, msg.message))
+				ESP_LOGI("mqtt_sender", "published %s %s",
+				         msg.topic, msg.message);
+			else
+				ESP_LOGW("mqtt_sender", "cannot publish %s %s",
+				         msg.topic, msg.message);
+		} else
+			ESP_LOGW("mqtt_sender",
+			         "mqtt not connected, cannot publish %s %s",
+			         msg.topic, msg.message);
 	}
 }
 
 TaskHandle_t collide_check_routine_handler = NULL;
 void collide_check_routine(void *) {
-	static bool is_free_prev = false;
-	static bool collide_bypass_prev = false;
+	static int is_free_prev = false;
 	struct mqtt_message msg = {.topic = "esp32/collision"};
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(20));
-		uint8_t is_free_prev = digitalRead(COLLIDE_CHECK_PIN);
-		if (is_free_prev == is_free_prev)
+		int is_free = digitalRead(COLLIDE_CHECK_PIN);
+		ESP_LOGV("collide_check_routine", "Read value: %hd", is_free);
+		if (is_free == is_free_prev)
 			continue;
-		is_free_prev = is_free_prev;
-		ESP_EARLY_LOGI("collide_trig", "%s",
-		               is_free_prev ? "Free" : "Collide");
-		digitalWrite(MO_EN_PIN, !is_free_prev);
-		digitalWrite(COLLIDE_STATUS_PIN, !is_free_prev);
-		msg.message = is_free_prev ? "free" : "collide";
+		is_free_prev = is_free;
+		ESP_LOGI("collide_trig", "%s", is_free ? "Free" : "Collide");
+		digitalWrite(MO_EN_PIN, !is_free);
+		digitalWrite(COLLIDE_STATUS_PIN, !is_free);
+		msg.message = is_free ? "free" : "collide";
 		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
 }
@@ -114,35 +129,27 @@ void display_status_routine(void *) {
 
 TaskHandle_t mqtt_report_routine_handler = NULL;
 void mqtt_report_routine(void *) {
-	char strbuf[7];
+	char strbuf_temp[7];
+	char strbuf_humid[7];
+	struct mqtt_message msg;
 	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-		if (!mqtt.connected()) {
-			ESP_LOGW("mqtt_report_routine",
-			         "MQTT client is not connected to server, "
-			         "cannot publish sensor value");
-			continue;
-		}
+
 		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
-		snprintf(strbuf, sizeof(strbuf), "%.2f",
+		snprintf(strbuf_temp, sizeof(strbuf_temp), "%.2f",
 		         dht11_temperature.value);
 		xSemaphoreGive(dht11_temperature.lock);
-		if (mqtt.publish("esp32/temperature", strbuf))
-			ESP_LOGI("mqtt_report_routine",
-			         "published temperature %s", strbuf);
-		else
-			ESP_LOGW("mqtt_report_routine",
-			         "publish temperature failed");
+		msg = (struct mqtt_message){.topic = "esp32/temperature",
+		                            .message = strbuf_temp};
+		xQueueSend(mqtt_message_queue, &msg, 0);
 
 		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
-		snprintf(strbuf, sizeof(strbuf), "%.2f", dht11_humidity.value);
+		snprintf(strbuf_humid, sizeof(strbuf_humid), "%.2f",
+		         dht11_humidity.value);
 		xSemaphoreGive(dht11_humidity.lock);
-		if (mqtt.publish("esp32/humidity", strbuf))
-			ESP_LOGI("mqtt_report_routine", "published humidity %s",
-			         strbuf);
-		else
-			ESP_LOGW("mqtt_report_routine",
-			         "publish humidity failed");
+		msg = (struct mqtt_message){.topic = "esp32/humidity",
+		                            .message = strbuf_humid};
+		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
 }
 
@@ -151,25 +158,27 @@ void mqtt_autoconnect_routine(void *) {
 	char client_id[32];
 	struct mqtt_message msg = {.topic = "esp32/status",
 	                           .message = "online"};
-	snprintf(client_id, sizeof(client_id), "%X", ESP.getEfuseMac());
+	snprintf(client_id, sizeof(client_id), "%llX", ESP.getEfuseMac());
 	mqtt.setServer(mqtt_server, mqtt_port);
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 		if (mqtt.connected()) {
 			mqtt.loop();
+			xQueueSend(mqtt_message_queue, &msg, 0);
 			continue;
 		}
 		if (!WiFi.isConnected()) {
-			ESP_LOGI("mqtt_autoconnect_routine",
+			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, WiFi is not "
 			         "connected");
 			continue;
 		}
 		if (mqtt.connect(client_id)) {
-			xQueueSend(mqtt_message_queue, &msg, 0);
+			ESP_LOGI("mqtt_autoconnect_routine",
+			         "Connected to mqtt server");
 			vTaskResume(mqtt_report_routine_handler);
 		} else {
-			ESP_LOGI("mqtt_autoconnect_routine",
+			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, retrying");
 			vTaskSuspend(mqtt_report_routine_handler);
 		}
@@ -186,13 +195,13 @@ void dht11_update_routine(void *) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 
 		read_buf = dht.readTemperature();
-		ESP_LOGD("dht11_update_routine", "Temperature: %.2f", read_buf);
+		ESP_LOGV("dht11_update_routine", "Temperature: %.2f", read_buf);
 		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
 		dht11_temperature.value = read_buf;
 		xSemaphoreGive(dht11_temperature.lock);
 
 		read_buf = dht.readHumidity();
-		ESP_LOGD("dht11_update_routine", "Humidity: %.2f", read_buf);
+		ESP_LOGV("dht11_update_routine", "Humidity: %.2f", read_buf);
 		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
 		dht11_humidity.value = read_buf;
 		xSemaphoreGive(dht11_humidity.lock);
@@ -208,7 +217,7 @@ IRAM_ATTR void collide_bypass_trig_handler(void) {
 	UBaseType_t collide_bypass_trig_lock = taskENTER_CRITICAL_FROM_ISR();
 	bool is_free;
 	unsigned long currtime = millis();
-	struct mqtt_message msg = {.topic = "esp32/collide"};
+	struct mqtt_message msg = {.topic = "esp32/collision"};
 	if (currtime - collide_bypass_btn_last_trig > 1000) {
 		collide_bypass_btn_last_trig = currtime;
 		collide_bypass = !collide_bypass;
@@ -264,17 +273,19 @@ void setup(void) {
 	dht11_temperature.lock = xSemaphoreCreateMutex();
 	dht11_humidity.lock = xSemaphoreCreateMutex();
 
-	xTaskCreate(&collide_check_routine, "collide_check_routine", 4096, NULL,
-	            0, &collide_check_routine_handler);
 	xTaskCreate(&led_blink, "led_blink", 1024, NULL, 0, NULL);
-	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
-	            0, &dht11_update_routine_handler);
-	xTaskCreate(&display_status_routine, "display_status_routine", 4096,
-	            NULL, 0, &display_status_routine_handler);
 	xTaskCreate(&mqtt_autoconnect_routine, "mqtt_autoconnect_routine", 2048,
 	            NULL, 0, &mqtt_autoconnect_routine_handler);
 	xTaskCreate(&mqtt_report_routine, "mqtt_report_routine", 8192, NULL, 0,
 	            &mqtt_report_routine_handler);
+	xTaskCreate(&collide_check_routine, "collide_check_routine", 4096, NULL,
+	            0, &collide_check_routine_handler);
+	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
+	            0, &dht11_update_routine_handler);
+	xTaskCreate(&display_status_routine, "display_status_routine", 4096,
+	            NULL, 0, &display_status_routine_handler);
+	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
+	            &mqtt_sender_handler);
 
 	attachInterrupt(COLLIDE_BYPASS_BTN_PIN, &collide_bypass_trig_handler,
 	                RISING);
