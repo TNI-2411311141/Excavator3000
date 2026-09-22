@@ -28,7 +28,7 @@
 #define MQTT_PORT 1883
 
 DHT dht(GPIO_NUM_4, DHT11);
-Adafruit_SSD1306 display(128, 64, &Wire, -1);
+Adafruit_SSD1306 screen(128, 64, &Wire, -1);
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
 
@@ -103,28 +103,27 @@ void led_blink(void *) {
 	}
 }
 
-TaskHandle_t display_status_routine_handler = NULL;
-void display_status_routine(void *) {
+TaskHandle_t screen_display_routine_handler = NULL;
+void screen_display_routine(void *) {
 	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-		ESP_LOGD("display_status_routine", "Updating display status");
-		display.clearDisplay();
-		display.setTextColor(SSD1306_WHITE);
-		display.setTextSize(1);
-		display.setCursor(0, 0);
+
+		screen.clearDisplay();
+		screen.setCursor(0, 0);
+
 		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
-		display.printf("Temp %3.2f C\n", dht11_temperature.value);
+		screen.printf("Temp %3.2f C\n", dht11_temperature.value);
 		xSemaphoreGive(dht11_temperature.lock);
 		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
-		display.printf("Humid %3.2f %%\n", dht11_humidity.value);
+		screen.printf("Humid %3.2f %%\n", dht11_humidity.value);
 		xSemaphoreGive(dht11_humidity.lock);
-		display.printf("MAC %s\n", WiFi.macAddress().c_str());
-		display.printf("IP %s\n", WiFi.localIP().toString().c_str());
-		display.printf("MQTT %s\n", mqtt.connected() ? "Connected"
-		                                             : "Not connected");
-		// display.printf("IPv6: %s\n",
-		//                WiFi.localIPv6().toString().c_str());
-		display.display();
+		screen.printf("MAC %s\n", WiFi.macAddress().c_str());
+		screen.printf("IP %s\n", WiFi.localIP().toString().c_str());
+		screen.printf("MQTT %s\n",
+		              mqtt.connected() ? "Connected" : "Not connected");
+
+		screen.display();
+		ESP_LOGD("screen_display_routine", "Displayed MCU status");
 	}
 }
 
@@ -208,7 +207,7 @@ void dht11_update_routine(void *) {
 		xSemaphoreGive(dht11_humidity.lock);
 
 		xTaskNotifyGive(mqtt_report_routine_handler);
-		xTaskNotifyGive(display_status_routine_handler);
+		xTaskNotifyGive(screen_display_routine_handler);
 	}
 }
 
@@ -266,14 +265,13 @@ void setup(void) {
 	dht.begin();
 	Wire.begin(GPIO_NUM_21, GPIO_NUM_22);
 
-	while (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
+	while (!screen.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
 		ESP_LOGW("main", "Initialize SSD1306 Failed, retrying");
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
-	display.clearDisplay();
-	display.setTextColor(SSD1306_WHITE);
-	display.setTextSize(1);
-	display.setCursor(0, 0);
+	screen.clearDisplay();
+	screen.setTextColor(SSD1306_WHITE);
+	screen.setTextSize(1);
 
 	dht11_temperature.lock = xSemaphoreCreateMutex();
 	dht11_humidity.lock = xSemaphoreCreateMutex();
@@ -287,8 +285,8 @@ void setup(void) {
 	            NULL, 0, &collision_check_routine_handler);
 	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
 	            0, &dht11_update_routine_handler);
-	xTaskCreate(&display_status_routine, "display_status_routine", 4096,
-	            NULL, 0, &display_status_routine_handler);
+	xTaskCreate(&screen_display_routine, "screen_display_routine", 4096,
+	            NULL, 0, &screen_display_routine_handler);
 	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
 	            &mqtt_sender_handler);
 
