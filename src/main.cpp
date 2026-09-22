@@ -12,22 +12,22 @@
 #include <freertos/semphr.h>
 #include <freertos/task.h>
 
-#define MCU_STATUS_PIN 2
-#define MO_EN_PIN 14
+#define MCU_STATUS_PIN GPIO_NUM_2
+#define MO_EN_PIN GPIO_NUM_14
 #define MO_EN_ACTIVE LOW
 #define MO_EN_INACTIVE HIGH
-#define COLLISION_TRIGGER_PIN 35
-#define COLLISION_STATUS_PIN 18
-#define COLLISION_PROTECTION_BYPASS_BTN_PIN 13
-#define COLLISION_PROTECTION_BYPASS_STATUS_PIN 15
+#define COLLISION_TRIGGER_PIN GPIO_NUM_35
+#define COLLISION_STATUS_PIN GPIO_NUM_18
+#define COLLISION_PROTECTION_BYPASS_BTN_PIN GPIO_NUM_13
+#define COLLISION_PROTECTION_BYPASS_STATUS_PIN GPIO_NUM_15
 
 #define WIFI_STA_SSID "pk-mtn-nx1"
 #define WIFI_STA_PASS "9gpnnhahm4qbgyp"
 
-const char *mqtt_server = "10.138.55.143";
-const int mqtt_port = 1883;
+#define MQTT_SERVER_IP "10.138.55.143"
+#define MQTT_PORT 1883
 
-DHT dht(4, DHT11);
+DHT dht(GPIO_NUM_4, DHT11);
 Adafruit_SSD1306 display(128, 64, &Wire, -1);
 WiFiClient espClient;
 PubSubClient mqtt(espClient);
@@ -160,7 +160,7 @@ void mqtt_autoconnect_routine(void *) {
 	struct mqtt_message msg = {.topic = "esp32/status",
 	                           .message = "online"};
 	snprintf(client_id, sizeof(client_id), "%llX", ESP.getEfuseMac());
-	mqtt.setServer(mqtt_server, mqtt_port);
+	mqtt.setServer(MQTT_SERVER_IP, MQTT_PORT);
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 		if (mqtt.connected()) {
@@ -264,7 +264,7 @@ void setup(void) {
 	pinMode(COLLISION_PROTECTION_BYPASS_STATUS_PIN, OUTPUT);
 
 	dht.begin();
-	Wire.begin(21, 22);
+	Wire.begin(GPIO_NUM_21, GPIO_NUM_22);
 
 	while (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
 		ESP_LOGW("main", "Initialize SSD1306 Failed, retrying");
