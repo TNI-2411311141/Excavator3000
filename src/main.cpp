@@ -16,10 +16,10 @@
 #define MO_EN_PIN 14
 #define MO_EN_ACTIVE LOW
 #define MO_EN_INACTIVE HIGH
-#define COLLIDE_CHECK_PIN 35
-#define COLLIDE_STATUS_PIN 18
-#define COLLIDE_BYPASS_BTN_PIN 13
-#define COLLIDE_BYPASS_STATUS_PIN 15
+#define COLLISION_TRIGGER_PIN 35
+#define COLLISION_STATUS_PIN 18
+#define COLLISION_PROTECTION_BYPASS_BTN_PIN 13
+#define COLLISION_PROTECTION_BYPASS_STATUS_PIN 15
 
 #define WIFI_STA_SSID "pk-mtn-nx1"
 #define WIFI_STA_PASS "9gpnnhahm4qbgyp"
@@ -40,7 +40,7 @@ struct guarded_float {
 struct guarded_float dht11_temperature = {.value = 0, .lock = NULL};
 struct guarded_float dht11_humidity = {.value = 0, .lock = NULL};
 
-volatile bool collide_bypass = 0;
+volatile bool collision_protection_bypass = 0;
 
 struct mqtt_message {
 	const char *topic;
@@ -74,20 +74,21 @@ void mqtt_sender(void *) {
 	}
 }
 
-TaskHandle_t collide_check_routine_handler = NULL;
-void collide_check_routine(void *) {
+TaskHandle_t collision_check_routine_handler = NULL;
+void collision_check_routine(void *) {
 	static int is_free_prev = false;
 	struct mqtt_message msg = {.topic = "esp32/collision"};
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(20));
-		int is_free = digitalRead(COLLIDE_CHECK_PIN);
-		ESP_LOGV("collide_check_routine", "Read value: %hd", is_free);
+		int is_free = digitalRead(COLLISION_TRIGGER_PIN);
+		ESP_LOGV("collision_check_routine", "Read value: %hd", is_free);
 		if (is_free == is_free_prev)
 			continue;
 		is_free_prev = is_free;
-		ESP_LOGI("collide_trig", "%s", is_free ? "Free" : "Collide");
+		ESP_LOGI("collision_check_routine", "%s",
+		         is_free ? "free" : "collide");
 		digitalWrite(MO_EN_PIN, !is_free);
-		digitalWrite(COLLIDE_STATUS_PIN, !is_free);
+		digitalWrite(COLLISION_STATUS_PIN, !is_free);
 		msg.message = is_free ? "free" : "collide";
 		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
@@ -211,38 +212,43 @@ void dht11_update_routine(void *) {
 	}
 }
 
-volatile unsigned long collide_bypass_btn_last_trig = 0;
+volatile unsigned long collision_protection_bypass_btn_last_trig = 0;
 
-IRAM_ATTR void collide_bypass_trig_handler(void) {
-	UBaseType_t collide_bypass_trig_lock = taskENTER_CRITICAL_FROM_ISR();
+IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
+	UBaseType_t collision_protection_bypass_trig_lock =
+	    taskENTER_CRITICAL_FROM_ISR();
 	bool is_free;
 	unsigned long currtime = millis();
 	struct mqtt_message msg = {.topic = "esp32/collision"};
-	if (currtime - collide_bypass_btn_last_trig > 1000) {
-		collide_bypass_btn_last_trig = currtime;
-		collide_bypass = !collide_bypass;
-		if (collide_bypass) {
-			vTaskSuspend(collide_check_routine_handler);
+	if (currtime - collision_protection_bypass_btn_last_trig > 1000) {
+		collision_protection_bypass_btn_last_trig = currtime;
+		collision_protection_bypass = !collision_protection_bypass;
+		if (collision_protection_bypass) {
+			vTaskSuspend(collision_check_routine_handler);
 			digitalWrite(MO_EN_PIN, MO_EN_ACTIVE);
-			digitalWrite(COLLIDE_STATUS_PIN, LOW);
-			digitalWrite(COLLIDE_BYPASS_STATUS_PIN, HIGH);
-			ESP_EARLY_LOGI("collide_bypass",
-			               "disable collision check");
+			digitalWrite(COLLISION_STATUS_PIN, LOW);
+			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
+			             HIGH);
+			ESP_EARLY_LOGI(
+			    "collision_protection_bypass_trig_handler",
+			    "disable collision check");
 			msg.message = "bypass";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
 		} else {
-			is_free = digitalRead(COLLIDE_CHECK_PIN);
+			is_free = digitalRead(COLLISION_TRIGGER_PIN);
 			digitalWrite(MO_EN_PIN, !is_free);
-			digitalWrite(COLLIDE_STATUS_PIN, !is_free);
-			digitalWrite(COLLIDE_BYPASS_STATUS_PIN, LOW);
-			vTaskResume(collide_check_routine_handler);
-			ESP_EARLY_LOGI("collide_bypass",
-			               "enable collision check");
+			digitalWrite(COLLISION_STATUS_PIN, !is_free);
+			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
+			             LOW);
+			vTaskResume(collision_check_routine_handler);
+			ESP_EARLY_LOGI(
+			    "collision_protection_bypass_trig_handler",
+			    "enable collision check");
 			msg.message = is_free ? "free" : "collide";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
 		}
 	}
-	taskEXIT_CRITICAL_FROM_ISR(collide_bypass_trig_lock);
+	taskEXIT_CRITICAL_FROM_ISR(collision_protection_bypass_trig_lock);
 }
 
 void setup(void) {
@@ -253,10 +259,10 @@ void setup(void) {
 
 	pinMode(MCU_STATUS_PIN, OUTPUT);
 	pinMode(MO_EN_PIN, OUTPUT);
-	pinMode(COLLIDE_CHECK_PIN, INPUT);
-	pinMode(COLLIDE_STATUS_PIN, OUTPUT);
-	pinMode(COLLIDE_BYPASS_BTN_PIN, INPUT_PULLDOWN);
-	pinMode(COLLIDE_BYPASS_STATUS_PIN, OUTPUT);
+	pinMode(COLLISION_TRIGGER_PIN, INPUT);
+	pinMode(COLLISION_STATUS_PIN, OUTPUT);
+	pinMode(COLLISION_PROTECTION_BYPASS_BTN_PIN, INPUT_PULLDOWN);
+	pinMode(COLLISION_PROTECTION_BYPASS_STATUS_PIN, OUTPUT);
 
 	dht.begin();
 	Wire.begin(21, 22);
@@ -278,8 +284,8 @@ void setup(void) {
 	            NULL, 0, &mqtt_autoconnect_routine_handler);
 	xTaskCreate(&mqtt_report_routine, "mqtt_report_routine", 8192, NULL, 0,
 	            &mqtt_report_routine_handler);
-	xTaskCreate(&collide_check_routine, "collide_check_routine", 4096, NULL,
-	            0, &collide_check_routine_handler);
+	xTaskCreate(&collision_check_routine, "collision_check_routine", 4096,
+	            NULL, 0, &collision_check_routine_handler);
 	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
 	            0, &dht11_update_routine_handler);
 	xTaskCreate(&display_status_routine, "display_status_routine", 4096,
@@ -287,11 +293,8 @@ void setup(void) {
 	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
 	            &mqtt_sender_handler);
 
-	attachInterrupt(COLLIDE_BYPASS_BTN_PIN, &collide_bypass_trig_handler,
-	                RISING);
-
-	ESP_LOGI("main", "collide_check_routine max memory usage: %u",
-	         uxTaskGetStackHighWaterMark(collide_check_routine_handler));
+	attachInterrupt(COLLISION_PROTECTION_BYPASS_BTN_PIN,
+	                &collision_protection_bypass_trig_handler, RISING);
 }
 
 void loop(void) { vTaskDelete(NULL); }
