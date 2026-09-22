@@ -212,16 +212,15 @@ void dht11_update_routine(void *) {
 	}
 }
 
-volatile unsigned long collision_protection_bypass_btn_last_trig = 0;
-
 IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
 	UBaseType_t collision_protection_bypass_trig_lock =
 	    taskENTER_CRITICAL_FROM_ISR();
+	static unsigned long last_trig = 0;
 	bool is_free;
 	unsigned long currtime = millis();
 	struct mqtt_message msg = {.topic = "esp32/collision"};
-	if (currtime - collision_protection_bypass_btn_last_trig > 1000) {
-		collision_protection_bypass_btn_last_trig = currtime;
+	if (currtime - last_trig > 1000) {
+		last_trig = currtime;
 		collision_protection_bypass = !collision_protection_bypass;
 		if (collision_protection_bypass) {
 			vTaskSuspend(collision_check_routine_handler);
