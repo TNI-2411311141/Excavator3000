@@ -37,8 +37,8 @@ struct guarded_float {
 	SemaphoreHandle_t lock;
 };
 
-struct guarded_float dht11_temperature = {.value = 0, .lock = NULL};
-struct guarded_float dht11_humidity = {.value = 0, .lock = NULL};
+struct guarded_float weather_temperature = {.value = 0, .lock = NULL};
+struct guarded_float weather_humidity = {.value = 0, .lock = NULL};
 
 volatile bool collision_protection_bypass = 0;
 
@@ -118,12 +118,12 @@ void screen_display_routine(void *) {
 		screen.clearDisplay();
 		screen.setCursor(0, 0);
 
-		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
-		screen.printf("Temp %3.2f C\n", dht11_temperature.value);
-		xSemaphoreGive(dht11_temperature.lock);
-		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
-		screen.printf("Humid %3.2f %%\n", dht11_humidity.value);
-		xSemaphoreGive(dht11_humidity.lock);
+		xSemaphoreTake(weather_temperature.lock, portMAX_DELAY);
+		screen.printf("Temp %3.2f C\n", weather_temperature.value);
+		xSemaphoreGive(weather_temperature.lock);
+		xSemaphoreTake(weather_humidity.lock, portMAX_DELAY);
+		screen.printf("Humid %3.2f %%\n", weather_humidity.value);
+		xSemaphoreGive(weather_humidity.lock);
 		screen.printf("MAC %s\n", WiFi.macAddress().c_str());
 		screen.printf("IP %s\n", WiFi.localIP().toString().c_str());
 		screen.printf("MQTT %s\n",
@@ -143,19 +143,19 @@ void mqtt_weather_report_routine(void *) {
 	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
-		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
+		xSemaphoreTake(weather_temperature.lock, portMAX_DELAY);
 		snprintf(strbuf_temp, sizeof(strbuf_temp), "%.2f",
-		         dht11_temperature.value);
-		xSemaphoreGive(dht11_temperature.lock);
+		         weather_temperature.value);
+		xSemaphoreGive(weather_temperature.lock);
 
 		msg = (struct mqtt_message){.topic = "esp32/temperature",
 		                            .message = strbuf_temp};
 		xQueueSend(mqtt_message_queue, &msg, 0);
 
-		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
+		xSemaphoreTake(weather_humidity.lock, portMAX_DELAY);
 		snprintf(strbuf_humid, sizeof(strbuf_humid), "%.2f",
-		         dht11_humidity.value);
-		xSemaphoreGive(dht11_humidity.lock);
+		         weather_humidity.value);
+		xSemaphoreGive(weather_humidity.lock);
 
 		msg = (struct mqtt_message){.topic = "esp32/humidity",
 		                            .message = strbuf_humid};
@@ -200,26 +200,28 @@ void mqtt_autoconnect_routine(void *) {
 	}
 }
 
-TaskHandle_t dht11_update_routine_handler = NULL;
-void dht11_update_routine(void *) {
+TaskHandle_t weather_sensor_polling_routine_handler = NULL;
+void weather_sensor_polling_routine(void *) {
 	float read_buf;
 
-	dht11_temperature.lock = xSemaphoreCreateMutex();
-	dht11_humidity.lock = xSemaphoreCreateMutex();
+	weather_temperature.lock = xSemaphoreCreateMutex();
+	weather_humidity.lock = xSemaphoreCreateMutex();
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 
 		read_buf = dht.readTemperature();
-		ESP_LOGV("dht11_update_routine", "Temperature: %.2f", read_buf);
-		xSemaphoreTake(dht11_temperature.lock, portMAX_DELAY);
-		dht11_temperature.value = read_buf;
-		xSemaphoreGive(dht11_temperature.lock);
+		ESP_LOGV("weather_sensor_polling_routine", "Temperature: %.2f",
+		         read_buf);
+		xSemaphoreTake(weather_temperature.lock, portMAX_DELAY);
+		weather_temperature.value = read_buf;
+		xSemaphoreGive(weather_temperature.lock);
 
 		read_buf = dht.readHumidity();
-		ESP_LOGV("dht11_update_routine", "Humidity: %.2f", read_buf);
-		xSemaphoreTake(dht11_humidity.lock, portMAX_DELAY);
-		dht11_humidity.value = read_buf;
-		xSemaphoreGive(dht11_humidity.lock);
+		ESP_LOGV("weather_sensor_polling_routine", "Humidity: %.2f",
+		         read_buf);
+		xSemaphoreTake(weather_humidity.lock, portMAX_DELAY);
+		weather_humidity.value = read_buf;
+		xSemaphoreGive(weather_humidity.lock);
 
 		xTaskNotifyGive(mqtt_weather_report_routine_handler);
 		xTaskNotifyGive(screen_display_routine_handler);
@@ -272,8 +274,8 @@ IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
 }
 
 void setup(void) {
-	dht11_temperature.lock = xSemaphoreCreateMutex();
-	dht11_humidity.lock = xSemaphoreCreateMutex();
+	weather_temperature.lock = xSemaphoreCreateMutex();
+	weather_humidity.lock = xSemaphoreCreateMutex();
 
 	WiFi.mode(WIFI_STA);
 	WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
@@ -305,8 +307,9 @@ void setup(void) {
 	            8192, NULL, 0, &mqtt_weather_report_routine_handler);
 	xTaskCreate(&collision_check_routine, "collision_check_routine", 4096,
 	            NULL, 0, &collision_check_routine_handler);
-	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
-	            0, &dht11_update_routine_handler);
+	xTaskCreate(&weather_sensor_polling_routine,
+	            "weather_sensor_polling_routine", 4096, NULL, 0,
+	            &weather_sensor_polling_routine_handler);
 	xTaskCreate(&screen_display_routine, "screen_display_routine", 4096,
 	            NULL, 0, &screen_display_routine_handler);
 	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
