@@ -51,6 +51,7 @@ xQueueHandle mqtt_message_queue = xQueueCreate(10, sizeof(struct mqtt_message));
 TaskHandle_t mqtt_sender_handler = NULL;
 void mqtt_sender(void *) {
 	struct mqtt_message msg;
+
 	while (1) {
 		if (xQueueReceive(mqtt_message_queue, &msg, portMAX_DELAY) !=
 		    pdTRUE) {
@@ -60,6 +61,7 @@ void mqtt_sender(void *) {
 		}
 		ESP_LOGV("mqtt_sender", "received %s %s", msg.topic,
 		         msg.message);
+
 		if (mqtt.connected()) {
 			if (mqtt.publish(msg.topic, msg.message))
 				ESP_LOGI("mqtt_sender", "published %s %s",
@@ -78,8 +80,10 @@ TaskHandle_t collision_check_routine_handler = NULL;
 void collision_check_routine(void *) {
 	static int is_free_prev = false;
 	struct mqtt_message msg = {.topic = "esp32/collision"};
+
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(20));
+
 		int is_free = digitalRead(COLLISION_TRIGGER_PIN);
 		ESP_LOGV("collision_check_routine", "Read value: %hd", is_free);
 		if (is_free == is_free_prev)
@@ -87,8 +91,10 @@ void collision_check_routine(void *) {
 		is_free_prev = is_free;
 		ESP_LOGI("collision_check_routine", "%s",
 		         is_free ? "free" : "collide");
+
 		digitalWrite(MO_EN_PIN, !is_free);
 		digitalWrite(COLLISION_STATUS_PIN, !is_free);
+
 		msg.message = is_free ? "free" : "collide";
 		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
@@ -98,6 +104,7 @@ void led_blink(void *) {
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 		digitalWrite(MCU_STATUS_PIN, 1);
+
 		vTaskDelay(pdMS_TO_TICKS(20));
 		digitalWrite(MCU_STATUS_PIN, 0);
 	}
@@ -132,6 +139,7 @@ void mqtt_report_routine(void *) {
 	char strbuf_temp[7];
 	char strbuf_humid[7];
 	struct mqtt_message msg;
+
 	while (1) {
 		ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
@@ -139,6 +147,7 @@ void mqtt_report_routine(void *) {
 		snprintf(strbuf_temp, sizeof(strbuf_temp), "%.2f",
 		         dht11_temperature.value);
 		xSemaphoreGive(dht11_temperature.lock);
+
 		msg = (struct mqtt_message){.topic = "esp32/temperature",
 		                            .message = strbuf_temp};
 		xQueueSend(mqtt_message_queue, &msg, 0);
@@ -147,8 +156,10 @@ void mqtt_report_routine(void *) {
 		snprintf(strbuf_humid, sizeof(strbuf_humid), "%.2f",
 		         dht11_humidity.value);
 		xSemaphoreGive(dht11_humidity.lock);
+
 		msg = (struct mqtt_message){.topic = "esp32/humidity",
 		                            .message = strbuf_humid};
+
 		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
 }
@@ -158,8 +169,10 @@ void mqtt_autoconnect_routine(void *) {
 	char client_id[32];
 	struct mqtt_message msg = {.topic = "esp32/status",
 	                           .message = "online"};
+
 	snprintf(client_id, sizeof(client_id), "%llX", ESP.getEfuseMac());
 	mqtt.setServer(MQTT_SERVER_IP, MQTT_PORT);
+
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 		if (mqtt.connected()) {
@@ -167,12 +180,14 @@ void mqtt_autoconnect_routine(void *) {
 			xQueueSend(mqtt_message_queue, &msg, 0);
 			continue;
 		}
+
 		if (!WiFi.isConnected()) {
 			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, WiFi is not "
 			         "connected");
 			continue;
 		}
+
 		if (mqtt.connect(client_id)) {
 			ESP_LOGI("mqtt_autoconnect_routine",
 			         "Connected to mqtt server");
@@ -218,30 +233,37 @@ IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
 	bool is_free;
 	unsigned long currtime = millis();
 	struct mqtt_message msg = {.topic = "esp32/collision"};
+
 	if (currtime - last_trig > 1000) {
 		last_trig = currtime;
 		collision_protection_bypass = !collision_protection_bypass;
+
 		if (collision_protection_bypass) {
 			vTaskSuspend(collision_check_routine_handler);
 			digitalWrite(MO_EN_PIN, MO_EN_ACTIVE);
 			digitalWrite(COLLISION_STATUS_PIN, LOW);
 			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
 			             HIGH);
+
 			ESP_EARLY_LOGI(
 			    "collision_protection_bypass_trig_handler",
 			    "disable collision check");
+
 			msg.message = "bypass";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
 		} else {
 			is_free = digitalRead(COLLISION_TRIGGER_PIN);
+
 			digitalWrite(MO_EN_PIN, !is_free);
 			digitalWrite(COLLISION_STATUS_PIN, !is_free);
 			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
 			             LOW);
 			vTaskResume(collision_check_routine_handler);
+
 			ESP_EARLY_LOGI(
 			    "collision_protection_bypass_trig_handler",
 			    "enable collision check");
+
 			msg.message = is_free ? "free" : "collide";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
 		}
@@ -250,6 +272,9 @@ IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
 }
 
 void setup(void) {
+	dht11_temperature.lock = xSemaphoreCreateMutex();
+	dht11_humidity.lock = xSemaphoreCreateMutex();
+
 	WiFi.mode(WIFI_STA);
 	WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
 	WiFi.setAutoConnect(true);
@@ -264,17 +289,14 @@ void setup(void) {
 
 	dht.begin();
 	Wire.begin(GPIO_NUM_21, GPIO_NUM_22);
-
 	while (!screen.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
 		ESP_LOGW("main", "Initialize SSD1306 Failed, retrying");
 		vTaskDelay(pdMS_TO_TICKS(1000));
 	}
+
 	screen.clearDisplay();
 	screen.setTextColor(SSD1306_WHITE);
 	screen.setTextSize(1);
-
-	dht11_temperature.lock = xSemaphoreCreateMutex();
-	dht11_humidity.lock = xSemaphoreCreateMutex();
 
 	xTaskCreate(&led_blink, "led_blink", 1024, NULL, 0, NULL);
 	xTaskCreate(&mqtt_autoconnect_routine, "mqtt_autoconnect_routine", 2048,
