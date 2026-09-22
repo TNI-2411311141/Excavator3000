@@ -204,8 +204,6 @@ TaskHandle_t weather_sensor_polling_routine_handler = NULL;
 void weather_sensor_polling_routine(void *) {
 	float read_buf;
 
-	weather_temperature.lock = xSemaphoreCreateMutex();
-	weather_humidity.lock = xSemaphoreCreateMutex();
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
 
