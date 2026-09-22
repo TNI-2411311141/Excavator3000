@@ -134,8 +134,8 @@ void screen_display_routine(void *) {
 	}
 }
 
-TaskHandle_t mqtt_report_routine_handler = NULL;
-void mqtt_report_routine(void *) {
+TaskHandle_t mqtt_weather_report_routine_handler = NULL;
+void mqtt_weather_report_routine(void *) {
 	char strbuf_temp[7];
 	char strbuf_humid[7];
 	struct mqtt_message msg;
@@ -191,11 +191,11 @@ void mqtt_autoconnect_routine(void *) {
 		if (mqtt.connect(client_id)) {
 			ESP_LOGI("mqtt_autoconnect_routine",
 			         "Connected to mqtt server");
-			vTaskResume(mqtt_report_routine_handler);
+			vTaskResume(mqtt_weather_report_routine_handler);
 		} else {
 			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, retrying");
-			vTaskSuspend(mqtt_report_routine_handler);
+			vTaskSuspend(mqtt_weather_report_routine_handler);
 		}
 	}
 }
@@ -221,7 +221,7 @@ void dht11_update_routine(void *) {
 		dht11_humidity.value = read_buf;
 		xSemaphoreGive(dht11_humidity.lock);
 
-		xTaskNotifyGive(mqtt_report_routine_handler);
+		xTaskNotifyGive(mqtt_weather_report_routine_handler);
 		xTaskNotifyGive(screen_display_routine_handler);
 	}
 }
@@ -301,8 +301,8 @@ void setup(void) {
 	xTaskCreate(&led_blink, "led_blink", 1024, NULL, 0, NULL);
 	xTaskCreate(&mqtt_autoconnect_routine, "mqtt_autoconnect_routine", 2048,
 	            NULL, 0, &mqtt_autoconnect_routine_handler);
-	xTaskCreate(&mqtt_report_routine, "mqtt_report_routine", 8192, NULL, 0,
-	            &mqtt_report_routine_handler);
+	xTaskCreate(&mqtt_weather_report_routine, "mqtt_weather_report_routine",
+	            8192, NULL, 0, &mqtt_weather_report_routine_handler);
 	xTaskCreate(&collision_check_routine, "collision_check_routine", 4096,
 	            NULL, 0, &collision_check_routine_handler);
 	xTaskCreate(&dht11_update_routine, "dht11_update_routine", 4096, NULL,
