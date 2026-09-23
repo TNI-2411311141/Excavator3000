@@ -236,32 +236,27 @@ IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
 	if (currtime - last_trig > 1000) {
 		last_trig = currtime;
 		collision_protection_bypass = !collision_protection_bypass;
+		digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
+		             collision_protection_bypass);
+
+		ESP_DRAM_LOGI(
+		    DRAM_STR("collision_protection_bypass_trig_handler"),
+		    "%s collision check",
+		    collision_protection_bypass ? "disable" : "enable");
 
 		if (collision_protection_bypass) {
 			vTaskSuspend(collision_check_routine_handler);
 			digitalWrite(MO_EN_PIN, MO_EN_ACTIVE);
 			digitalWrite(COLLISION_STATUS_PIN, LOW);
-			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
-			             HIGH);
-
-			ESP_EARLY_LOGI(
-			    "collision_protection_bypass_trig_handler",
-			    "disable collision check");
 
 			msg.message = "bypass";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
 		} else {
 			is_free = digitalRead(COLLISION_TRIGGER_PIN);
-
-			digitalWrite(MO_EN_PIN, !is_free);
+			digitalWrite(MO_EN_PIN,
+			             is_free ? MO_EN_ACTIVE : MO_EN_INACTIVE);
 			digitalWrite(COLLISION_STATUS_PIN, !is_free);
-			digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
-			             LOW);
 			vTaskResume(collision_check_routine_handler);
-
-			ESP_EARLY_LOGI(
-			    "collision_protection_bypass_trig_handler",
-			    "enable collision check");
 
 			msg.message = is_free ? "free" : "collide";
 			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
