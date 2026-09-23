@@ -159,7 +159,6 @@ void mqtt_weather_report_routine(void *) {
 
 		msg = (struct mqtt_message){.topic = "esp32/humidity",
 		                            .message = strbuf_humid};
-
 		xQueueSend(mqtt_message_queue, &msg, 0);
 	}
 }
