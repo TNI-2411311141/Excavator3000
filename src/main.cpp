@@ -293,19 +293,19 @@ void setup(void) {
 	screen.setTextSize(1);
 
 	xTaskCreate(&led_blink, "led_blink", 1024, NULL, 0, NULL);
-	xTaskCreate(&mqtt_autoconnect_routine, "mqtt_autoconnect_routine", 2048,
-	            NULL, 0, &mqtt_autoconnect_routine_handler);
-	xTaskCreate(&mqtt_weather_report_routine, "mqtt_weather_report_routine",
-	            8192, NULL, 0, &mqtt_weather_report_routine_handler);
 	xTaskCreate(&collision_check_routine, "collision_check_routine", 4096,
 	            NULL, 0, &collision_check_routine_handler);
+	xTaskCreate(&mqtt_autoconnect_routine, "mqtt_autoconnect_routine", 2048,
+	            NULL, 0, &mqtt_autoconnect_routine_handler);
+	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
+	            &mqtt_sender_handler);
+	xTaskCreate(&mqtt_weather_report_routine, "mqtt_weather_report_routine",
+	            8192, NULL, 0, &mqtt_weather_report_routine_handler);
+	xTaskCreate(&screen_display_routine, "screen_display_routine", 4096,
+	            NULL, 0, &screen_display_routine_handler);
 	xTaskCreate(&weather_sensor_polling_routine,
 	            "weather_sensor_polling_routine", 4096, NULL, 0,
 	            &weather_sensor_polling_routine_handler);
-	xTaskCreate(&screen_display_routine, "screen_display_routine", 4096,
-	            NULL, 0, &screen_display_routine_handler);
-	xTaskCreate(&mqtt_sender, "mqtt_sender", 4096, NULL, 0,
-	            &mqtt_sender_handler);
 
 	attachInterrupt(COLLISION_PROTECTION_BYPASS_BTN_PIN,
 	                &collision_protection_bypass_trig_handler, RISING);
