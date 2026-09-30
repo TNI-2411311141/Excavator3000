@@ -42,6 +42,31 @@ struct guarded_float weather_humidity = {.value = 0, .lock = NULL};
 
 volatile bool collision_protection_bypass = 0;
 
+// === Node-RED Remote Bypass Control ===
+enum bypass_command : uint8_t { BYPASS_OFF, BYPASS_ON, BYPASS_TOGGLE };
+QueueHandle_t bypass_command_queue = NULL;
+SemaphoreHandle_t mqtt_lock = NULL;
+portMUX_TYPE bypass_state_lock = portMUX_INITIALIZER_UNLOCKED;
+
+bool get_collision_bypass() {
+	portENTER_CRITICAL(&bypass_state_lock);
+	bool bypass = collision_protection_bypass;
+	portEXIT_CRITICAL(&bypass_state_lock);
+	return bypass;
+}
+
+void mqtt_callback(char *topic, byte *payload, unsigned int length) {
+	if (strcmp(topic, "esp32/bypass/set") != 0 || length != 1 ||
+	    (payload[0] != '0' && payload[0] != '1'))
+		return;
+	// === Node-RED Remote Bypass Control: received command log ===
+	ESP_LOGI("mqtt_receiver", "received %s %c (bypass %s)", topic,
+	         payload[0], payload[0] == '1' ? "ON" : "OFF");
+	bypass_command command = payload[0] == '1' ? BYPASS_ON : BYPASS_OFF;
+	if (xQueueSend(bypass_command_queue, &command, 0) != pdTRUE)
+		ESP_LOGW("bypass", "Command queue full; command not applied");
+}
+
 struct mqtt_message {
 	const char *topic;
 	const char *message;
@@ -51,17 +76,30 @@ xQueueHandle mqtt_message_queue = xQueueCreate(10, sizeof(struct mqtt_message));
 TaskHandle_t mqtt_sender_handler = NULL;
 void mqtt_sender(void *) {
 	struct mqtt_message msg;
+	// === Node-RED Remote Bypass Control ===
+	// Coalesce changes and retry the actual current state until published.
+	bool bypass_status_pending = true;
 
 	while (1) {
-		if (xQueueReceive(mqtt_message_queue, &msg, portMAX_DELAY) !=
-		    pdTRUE) {
-			ESP_LOGW("mqtt_sender",
-			         "timed out reached, no message received");
-			continue;
+		if (ulTaskNotifyTake(pdTRUE, 0))
+			bypass_status_pending = true;
+		if (bypass_status_pending) {
+			xSemaphoreTake(mqtt_lock, portMAX_DELAY);
+			if (mqtt.connected() &&
+			    mqtt.publish("esp32/bypass/status",
+			                 get_collision_bypass() ? "1" : "0",
+			                 true))
+				bypass_status_pending = false;
+			xSemaphoreGive(mqtt_lock);
 		}
+		if (xQueueReceive(mqtt_message_queue, &msg,
+		                  pdMS_TO_TICKS(100)) != pdTRUE)
+			continue;
 		ESP_LOGV("mqtt_sender", "received %s %s", msg.topic,
 		         msg.message);
 
+		// === Node-RED Remote Bypass Control: serialize MQTT access ===
+		xSemaphoreTake(mqtt_lock, portMAX_DELAY);
 		if (mqtt.connected()) {
 			if (mqtt.publish(msg.topic, msg.message))
 				ESP_LOGI("mqtt_sender", "published %s %s",
@@ -73,7 +111,27 @@ void mqtt_sender(void *) {
 			ESP_LOGW("mqtt_sender",
 			         "mqtt not connected, cannot publish %s %s",
 			         msg.topic, msg.message);
+		xSemaphoreGive(mqtt_lock);
 	}
+}
+
+// === Node-RED Remote Bypass Control ===
+// Only the collision task calls this, preventing competing sensor/GPIO writes.
+void set_collision_bypass(bool bypass) {
+	digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN, bypass);
+	bool is_free = digitalRead(COLLISION_TRIGGER_PIN);
+	digitalWrite(MO_EN_PIN,
+	             (bypass || is_free) ? MO_EN_ACTIVE : MO_EN_INACTIVE);
+	digitalWrite(COLLISION_STATUS_PIN, bypass ? LOW : !is_free);
+	portENTER_CRITICAL(&bypass_state_lock);
+	collision_protection_bypass = bypass;
+	portEXIT_CRITICAL(&bypass_state_lock);
+	ESP_LOGI("bypass", "%s collision check", bypass ? "disable" : "enable");
+	struct mqtt_message msg = {
+	    .topic = "esp32/collision",
+	    .message = bypass ? "bypass" : (is_free ? "free" : "collide")};
+	xQueueSend(mqtt_message_queue, &msg, 0);
+	xTaskNotifyGive(mqtt_sender_handler);
 }
 
 TaskHandle_t collision_check_routine_handler = NULL;
@@ -83,6 +141,21 @@ void collision_check_routine(void *) {
 
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(20));
+
+		// === Node-RED Remote Bypass Control ===
+		// Stay alive to receive commands; skip sensor handling while
+		// bypassed.
+		bypass_command command;
+		for (unsigned int n = 0;
+		     n < 16 &&
+		     xQueueReceive(bypass_command_queue, &command, 0) == pdTRUE;
+		     ++n) {
+			set_collision_bypass(command == BYPASS_TOGGLE
+			                         ? !collision_protection_bypass
+			                         : command == BYPASS_ON);
+		}
+		if (collision_protection_bypass)
+			continue;
 
 		int is_free = digitalRead(COLLISION_TRIGGER_PIN);
 		ESP_LOGV("collision_check_routine", "Read value: %hd", is_free);
@@ -126,8 +199,12 @@ void screen_display_routine(void *) {
 		xSemaphoreGive(weather_humidity.lock);
 		screen.printf("MAC %s\n", WiFi.macAddress().c_str());
 		screen.printf("IP %s\n", WiFi.localIP().toString().c_str());
+		// === Node-RED Remote Bypass Control: serialize MQTT access ===
+		xSemaphoreTake(mqtt_lock, portMAX_DELAY);
+		bool mqtt_connected = mqtt.connected();
+		xSemaphoreGive(mqtt_lock);
 		screen.printf("MQTT %s\n",
-		              mqtt.connected() ? "Connected" : "Not connected");
+		              mqtt_connected ? "Connected" : "Not connected");
 
 		screen.display();
 		ESP_LOGD("screen_display_routine", "Displayed MCU status");
@@ -170,32 +247,43 @@ void mqtt_autoconnect_routine(void *) {
 	                           .message = "online"};
 
 	snprintf(client_id, sizeof(client_id), "%llX", ESP.getEfuseMac());
-	mqtt.setServer(MQTT_SERVER_IP, MQTT_PORT);
+	// Server and callback configured in setup before MQTT tasks start.
 
 	while (1) {
 		vTaskDelay(pdMS_TO_TICKS(3000));
+		// === Node-RED Remote Bypass Control ===
+		xSemaphoreTake(mqtt_lock, portMAX_DELAY);
 		if (mqtt.connected()) {
 			mqtt.loop();
+			xSemaphoreGive(mqtt_lock);
 			xQueueSend(mqtt_message_queue, &msg, 0);
 			continue;
 		}
 
 		if (!WiFi.isConnected()) {
+			xSemaphoreGive(mqtt_lock);
 			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, WiFi is not "
 			         "connected");
 			continue;
 		}
 
-		if (mqtt.connect(client_id)) {
+		// === Node-RED Remote Bypass Control ===
+		if (mqtt.connect(client_id) &&
+		    mqtt.subscribe("esp32/bypass/set", 1)) {
+			xTaskNotifyGive(mqtt_sender_handler);
 			ESP_LOGI("mqtt_autoconnect_routine",
 			         "Connected to mqtt server");
 			vTaskResume(mqtt_weather_report_routine_handler);
 		} else {
+			// Retry connection/subscription together if subscribing
+			// failed.
+			mqtt.disconnect();
 			ESP_LOGW("mqtt_autoconnect_routine",
 			         "Cannot connect to mqtt server, retrying");
 			vTaskSuspend(mqtt_weather_report_routine_handler);
 		}
+		xSemaphoreGive(mqtt_lock);
 	}
 }
 
@@ -226,48 +314,30 @@ void weather_sensor_polling_routine(void *) {
 }
 
 IRAM_ATTR void collision_protection_bypass_trig_handler(void) {
-	UBaseType_t collision_protection_bypass_trig_lock =
-	    taskENTER_CRITICAL_FROM_ISR();
+	// === Node-RED Remote Bypass Control ===
+	// Preserve one-second debounce; defer state/GPIO/MQTT work to tasks.
 	static unsigned long last_trig = 0;
-	bool is_free;
 	unsigned long currtime = millis();
-	struct mqtt_message msg = {.topic = "esp32/collision"};
-
 	if (currtime - last_trig > 1000) {
-		last_trig = currtime;
-		collision_protection_bypass = !collision_protection_bypass;
-		digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN,
-		             collision_protection_bypass);
-
-		ESP_DRAM_LOGI(
-		    DRAM_STR("collision_protection_bypass_trig_handler"),
-		    "%s collision check",
-		    collision_protection_bypass ? "disable" : "enable");
-
-		if (collision_protection_bypass) {
-			vTaskSuspend(collision_check_routine_handler);
-			digitalWrite(MO_EN_PIN, MO_EN_ACTIVE);
-			digitalWrite(COLLISION_STATUS_PIN, LOW);
-
-			msg.message = "bypass";
-			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
-		} else {
-			is_free = digitalRead(COLLISION_TRIGGER_PIN);
-			digitalWrite(MO_EN_PIN,
-			             is_free ? MO_EN_ACTIVE : MO_EN_INACTIVE);
-			digitalWrite(COLLISION_STATUS_PIN, !is_free);
-			vTaskResume(collision_check_routine_handler);
-
-			msg.message = is_free ? "free" : "collide";
-			xQueueSendFromISR(mqtt_message_queue, &msg, NULL);
-		}
+		bypass_command command = BYPASS_TOGGLE;
+		BaseType_t higher_priority_task_woken = pdFALSE;
+		if (xQueueSendFromISR(bypass_command_queue, &command,
+		                      &higher_priority_task_woken) == pdTRUE)
+			last_trig = currtime;
+		if (higher_priority_task_woken)
+			portYIELD_FROM_ISR();
 	}
-	taskEXIT_CRITICAL_FROM_ISR(collision_protection_bypass_trig_lock);
 }
 
 void setup(void) {
 	weather_temperature.lock = xSemaphoreCreateMutex();
 	weather_humidity.lock = xSemaphoreCreateMutex();
+	// === Node-RED Remote Bypass Control ===
+	bypass_command_queue = xQueueCreate(16, sizeof(bypass_command));
+	mqtt_lock = xSemaphoreCreateMutex();
+	configASSERT(bypass_command_queue && mqtt_lock);
+	mqtt.setServer(MQTT_SERVER_IP, MQTT_PORT);
+	mqtt.setCallback(mqtt_callback);
 
 	WiFi.mode(WIFI_STA);
 	WiFi.begin(WIFI_STA_SSID, WIFI_STA_PASS);
@@ -280,6 +350,11 @@ void setup(void) {
 	pinMode(COLLISION_STATUS_PIN, OUTPUT);
 	pinMode(COLLISION_PROTECTION_BYPASS_BTN_PIN, INPUT_PULLDOWN);
 	pinMode(COLLISION_PROTECTION_BYPASS_STATUS_PIN, OUTPUT);
+	// === Node-RED Remote Bypass Control: boot with protection active ===
+	digitalWrite(COLLISION_PROTECTION_BYPASS_STATUS_PIN, LOW);
+	bool is_free = digitalRead(COLLISION_TRIGGER_PIN);
+	digitalWrite(MO_EN_PIN, is_free ? MO_EN_ACTIVE : MO_EN_INACTIVE);
+	digitalWrite(COLLISION_STATUS_PIN, !is_free);
 
 	dht.begin();
 	Wire.begin(GPIO_NUM_21, GPIO_NUM_22);
