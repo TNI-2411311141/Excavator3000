@@ -14,8 +14,8 @@
 
 #define MCU_STATUS_PIN GPIO_NUM_2
 #define MO_EN_PIN GPIO_NUM_25
-#define MO_EN_ACTIVE LOW
-#define MO_EN_INACTIVE HIGH
+#define MO_EN_ACTIVE HIGH
+#define MO_EN_INACTIVE LOW
 #define COLLISION_TRIGGER_PIN GPIO_NUM_33
 #define COLLISION_STATUS_PIN GPIO_NUM_18
 #define COLLISION_PROTECTION_BYPASS_BTN_PIN GPIO_NUM_32
@@ -92,7 +92,7 @@ void collision_check_routine(void *) {
 		ESP_LOGI("collision_check_routine", "%s",
 		         is_free ? "free" : "collide");
 
-		digitalWrite(MO_EN_PIN, !is_free);
+		digitalWrite(MO_EN_PIN, is_free ? MO_EN_ACTIVE : MO_EN_INACTIVE);
 		digitalWrite(COLLISION_STATUS_PIN, !is_free);
 
 		msg.message = is_free ? "free" : "collide";
